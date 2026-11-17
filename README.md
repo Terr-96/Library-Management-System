@@ -1,9 +1,16 @@
-What is the project? (Library Management System for small libraries)
-Technologies: PHP, MySQL, XAMPP, Bootstrap
-Features: login, role-based dashboards, book management
-How to run it: Import the SQL file, place it in the htdocs folder, and open localhost/LMS_demo
+# Library Management System
 
-How to execute?
-Copy the files into xampp/htdocs/LMS_demo
-In phpMyAdmin, create a database named lms and import lms.sql
-Open localhost/LMS_demo
+A web-based library management system for small libraries.
+
+## Technologies
+PHP, MySQL, XAMPP, Bootstrap
+
+## Features
+- Login and registration
+- Role-based dashboards (admin / librarian / member)
+- Book management
+
+## How to run
+1. Copy the files into `xampp/htdocs/LMS_demo`
+2. In phpMyAdmin, create a database named `lms` and import `lms.sql`
+3. Open `localhost/LMS_demo`
