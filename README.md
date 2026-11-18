@@ -1,6 +1,6 @@
 # Library Management System
 
-A web-based library management system for small libraries.
+A web-based library management system for small and medium libraries.
 
 ## Technologies
 PHP, MySQL, XAMPP, Bootstrap
