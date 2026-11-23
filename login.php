@@ -43,17 +43,38 @@ if (isset($_POST['login']) && !$locked_out) {
     if (!validate_csrf_token($_POST['csrf_token'] ?? '')) {
         $login_error = "Invalid CSRF token. Please try again.";
     } else {
-        $username = trim($_POST['username']);
-        $password = $_POST['password'];
+        $username = trim($_POST['username'] ?? '');
+        $password = $_POST['password'] ?? '';
 
         $stmt = $connection->prepare("SELECT * FROM users WHERE username = ? AND is_active = 1");
         $stmt->bind_param("s", $username);
         $stmt->execute();
         $result = $stmt->get_result();
+        $user = $result->fetch_assoc();
+        $stmt->close();
 
-        if ($result->num_rows > 0) {
-            $user = $result->fetch_assoc();
-            if (password_verify($password, $user['password_hash'])) {
+        if ($user && password_verify($password, $user['password_hash'])) {
+
+            // --- Block suspended / expired members from logging in ---
+            $account_blocked = false;
+            if ($user['role'] !== 'admin' && $user['role'] !== 'librarian') {
+                $stmt = $connection->prepare("SELECT member_status FROM members WHERE user_id = ?");
+                $stmt->bind_param("i", $user['user_id']);
+                $stmt->execute();
+                $member_row = $stmt->get_result()->fetch_assoc();
+                $stmt->close();
+
+                $blocked_statuses = ['suspended', 'expired', 'inactive', 'blocked'];
+                if (!$member_row) {
+                    $account_blocked = true;
+                    $login_error = "Member record not found. Please contact the librarian.";
+                } elseif (in_array(strtolower($member_row['member_status']), $blocked_statuses, true)) {
+                    $account_blocked = true;
+                    $login_error = "Your membership is " . strtolower($member_row['member_status']) . ". Please contact the librarian.";
+                }
+            }
+
+            if (!$account_blocked) {
                 session_regenerate_id(true); // secure session
                 $_SESSION['user_id'] = $user['user_id'];
                 $_SESSION['role'] = $user['role'];
@@ -62,6 +83,7 @@ if (isset($_POST['login']) && !$locked_out) {
                 $_SESSION['username'] = $user['username'];
 
                 $_SESSION['login_attempts'] = 0; // reset attempts
+                unset($_SESSION['csrf_token']);  // new token for next session state
 
                 if ($user['role'] === 'admin') {
                     header('Location: admin_dashboard.php');
@@ -71,19 +93,12 @@ if (isset($_POST['login']) && !$locked_out) {
                     header('Location: member_dashboard.php');
                 }
                 exit;
-            } else {
-                $_SESSION['login_attempts']++;
-                $_SESSION['last_login_attempt'] = time();
-                $login_error = "Invalid username or password!";
             }
         } else {
             $_SESSION['login_attempts']++;
             $_SESSION['last_login_attempt'] = time();
             $login_error = "Invalid username or password!";
         }
-
-        $stmt->close();
-        $connection->close();
     }
 }
 ?>
@@ -93,9 +108,9 @@ if (isset($_POST['login']) && !$locked_out) {
     <title>Login - Library Management System</title>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link rel="stylesheet" type="text/css" href="bootstrap-4.4.1/css/bootstrap.min.css" />
-    <script type="text/javascript" src="bootstrap-4.4.1/js/jquery_latest.js"></script>
-    <script type="text/javascript" src="bootstrap-4.4.1/js/bootstrap.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/jquery@3.5.1/dist/jquery.slim.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
     <style type="text/css">
         body {
             background-image: url("https://images.unsplash.com/photo-1481627834876-b7833e8f5570?ixlib=rb-4.0.3&auto=format&fit=crop&w=1920&q=80");
@@ -200,12 +215,13 @@ if (isset($_POST['login']) && !$locked_out) {
                 </div>
             <?php else: ?>
                 <?php if (!empty($login_error)): ?>
-                    <div class="alert alert-danger"><?php echo htmlspecialchars($login_error); ?></div>
+                    <div class="alert alert-danger"><?php echo htmlspecialchars($login_error, ENT_QUOTES, 'UTF-8'); ?></div>
                 <?php endif; ?>
-                <form action="" method="post" autocomplete="off">
-                    <input type="text" name="username" class="form-control" placeholder="Username" required autofocus>
-                    <input type="password" name="password" class="form-control" placeholder="Password" required autocomplete="new-password">
-                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars(generate_csrf_token()); ?>">
+                <form action="" method="post" autocomplete="on">
+                    <input type="text" name="username" class="form-control" placeholder="Username" autocomplete="username" required autofocus
+                           value="<?php echo htmlspecialchars($_POST['username'] ?? '', ENT_QUOTES, 'UTF-8'); ?>">
+                    <input type="password" name="password" class="form-control" placeholder="Password" autocomplete="current-password" required>
+                    <input type="hidden" name="csrf_token" value="<?php echo htmlspecialchars(generate_csrf_token(), ENT_QUOTES, 'UTF-8'); ?>">
                     <button type="submit" name="login" class="btn btn-login">Login</button>
                 </form>
             <?php endif; ?>

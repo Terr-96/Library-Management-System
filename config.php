@@ -1,26 +1,17 @@
 <?php
-// Enable MySQLi error reporting for development (disable in production)
+// Show errors as exceptions (set to off or log-only in production)
 mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 
-$host = "localhost";
-$user = "root";
+$host     = "localhost";
+$user     = "root";
 $password = "";
-$dbname = "lms";
+$dbname   = "lms";
 
-$connection = mysqli_connect($host, $user, $password, $dbname);
-
-if (!$connection) {
-    // Log error instead of displaying in production
-    error_log("Database connection failed: " . mysqli_connect_error());
+try {
+    $connection = mysqli_connect($host, $user, $password, $dbname);
+    mysqli_set_charset($connection, 'utf8mb4');
+} catch (mysqli_sql_exception $e) {
+    error_log("Database connection failed: " . $e->getMessage());
+    http_response_code(500);
     die("Database connection error. Please try again later.");
 }
-
-// Set charset to utf8mb4 for full Unicode support
-mysqli_set_charset($connection, 'utf8mb4');
-?>
-
-
-
-
-
-
