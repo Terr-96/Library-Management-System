@@ -434,9 +434,9 @@ $has_filters  = ($q !== '' || $category !== '' || $availability !== 'all');
                             Welcome, <?php echo e($_SESSION['name'] ?? ''); ?>
                         </a>
                         <div class="dropdown-menu dropdown-menu-right" aria-labelledby="userDropdown">
-                            <a class="dropdown-item" href="member_profile.php">My Profile</a>
+                            <a class="dropdown-item" href="update_profile.php">My Profile</a>
                             <a class="dropdown-item" href="notification_settings.php">Notifications</a>
-                            <a class="dropdown-item" href="change_password.php">Change Password</a>
+                            <a class="dropdown-item" href="update_profile.php#password">Change Password</a>
                             <div class="dropdown-divider"></div>
                             <a class="dropdown-item" href="logout.php">Logout</a>
                         </div>
