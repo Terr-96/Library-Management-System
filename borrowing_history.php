@@ -388,9 +388,9 @@ $filter_labels = [
                         </a>
                         <div class="dropdown-menu" aria-labelledby="booksDropdown">
                             <a class="dropdown-item" href="book_catalog.php">Browse Catalog</a>
-                            <a class="dropdown-item" href="book_search.php">Search Books</a>
-                            <a class="dropdown-item" href="new_arrivals.php">New Arrivals</a>
-                            <a class="dropdown-item" href="popular_books.php">Popular Books</a>
+                            <a class="dropdown-item" href="book_catalog.php#q">Search Books</a>
+                            <a class="dropdown-item" href="book_catalog.php?sort=newest">Newest Books</a>
+                            <a class="dropdown-item" href="book_catalog.php?sort=popular">Popular Books</a>
                         </div>
                     </li>
                     <li class="nav-item dropdown active">
@@ -398,10 +398,10 @@ $filter_labels = [
                             My Books
                         </a>
                         <div class="dropdown-menu" aria-labelledby="myBooksDropdown">
-                            <a class="dropdown-item" href="current_loans.php">Current Loans</a>
+                            <a class="dropdown-item" href="member_dashboard.php#current-loans">Current Loans</a>
                             <a class="dropdown-item" href="borrowing_history.php">Borrowing History</a>
                             <a class="dropdown-item" href="renew_books.php">Renew Books</a>
-                            <a class="dropdown-item" href="reservations.php">My Reservations</a>
+                            <a class="dropdown-item" href="reserve_books.php#my-reservations">My Reservations</a>
                         </div>
                     </li>
                     <li class="nav-item dropdown">
@@ -409,9 +409,9 @@ $filter_labels = [
                             My Account
                         </a>
                         <div class="dropdown-menu" aria-labelledby="accountDropdown">
-                            <a class="dropdown-item" href="account_overview.php">Account Overview</a>
-                            <a class="dropdown-item" href="payment_history.php">Payment History</a>
-                            <a class="dropdown-item" href="fines_fees.php">Fines &amp; Fees</a>
+                            <a class="dropdown-item" href="member_dashboard.php#account-overview">Account Overview</a>
+                            <a class="dropdown-item" href="pay_fines.php#payment-history">Payment History</a>
+                            <a class="dropdown-item" href="pay_fines.php">Fines &amp; Fees</a>
                         </div>
                     </li>
                     <li class="nav-item">
@@ -425,7 +425,6 @@ $filter_labels = [
                         </a>
                         <div class="dropdown-menu dropdown-menu-right" aria-labelledby="userDropdown">
                             <a class="dropdown-item" href="update_profile.php">My Profile</a>
-                            <a class="dropdown-item" href="notification_settings.php">Notifications</a>
                             <a class="dropdown-item" href="update_profile.php#password">Change Password</a>
                             <div class="dropdown-divider"></div>
                             <a class="dropdown-item" href="logout.php">Logout</a>
