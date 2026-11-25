@@ -2,8 +2,8 @@
 session_start();
 include('config.php');
 
-// Check if user is logged in as librarian
-if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'librarian') {
+// ---------- Access control ----------
+if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'librarian' || !isset($_SESSION['user_id'])) {
     header("Location: login.php");
     exit();
 }
@@ -18,48 +18,101 @@ if (isset($_SESSION['LAST_ACTIVITY']) && (time() - $_SESSION['LAST_ACTIVITY']) >
 }
 $_SESSION['LAST_ACTIVITY'] = time();
 
-// Helper function to safely output text
-function e($string) {
-    return htmlspecialchars($string, ENT_QUOTES, 'UTF-8');
+const FINE_PER_DAY = 1.00; // RM per day overdue (same rate as the rest of the system)
+
+function e($value) {
+    return htmlspecialchars((string)$value, ENT_QUOTES, 'UTF-8');
 }
 
-// Fetch counts with prepared statements
-function fetch_count($connection, $query) {
-    if ($stmt = $connection->prepare($query)) {
-        $stmt->execute();
-        $stmt->bind_result($count);
-        $stmt->fetch();
-        $stmt->close();
-        return $count;
-    }
-    return 0;
+function fmt_date($date) {
+    $ts = strtotime((string)$date);
+    return $ts ? date('M d, Y', $ts) : '-';
 }
 
-$books_count = fetch_count($connection, "SELECT COUNT(*) FROM books WHERE status='active'");
-$loans_count = fetch_count($connection, "SELECT COUNT(*) FROM loan_records WHERE status='active'");
-$overdue_count = fetch_count($connection, "SELECT COUNT(*) FROM loan_records WHERE status='overdue'");
-$returned_count = fetch_count($connection, "SELECT COUNT(*) FROM loan_records WHERE return_date = CURDATE()");
-$issued_count = fetch_count($connection, "SELECT COUNT(*) FROM loan_records WHERE issue_date = CURDATE()");
+function money($amount) {
+    return 'RM ' . number_format((float)$amount, 2);
+}
 
-// Fetch today's activity
-$today_activity = [];
-if ($stmt = $connection->prepare("
-    SELECT lr.issue_date, lr.return_date, lr.due_date, lr.status, u.first_name, u.last_name, b.title, m.member_number
-    FROM loan_records lr
-    JOIN members m ON lr.member_id = m.member_id
-    JOIN users u ON m.user_id = u.user_id
-    JOIN books b ON lr.book_id = b.book_id
-    WHERE DATE(lr.issue_date) = CURDATE() OR DATE(lr.return_date) = CURDATE()
-    ORDER BY GREATEST(lr.issue_date, IFNULL(lr.return_date, '0000-00-00')) DESC
-    LIMIT 15
-")) {
+// ---------- Optional tables ----------
+$tbl = $connection->query("SHOW TABLES LIKE 'reservations'");
+$reservations_ready = ($tbl && $tbl->num_rows > 0);
+
+// ---------- Statistics (one query) ----------
+$stats = $connection->query("
+    SELECT
+        (SELECT COALESCE(SUM(available_copies), 0) FROM books WHERE status = 'active')                  AS available_copies,
+        (SELECT COUNT(*) FROM loan_records WHERE return_date IS NULL)                                   AS active_loans,
+        (SELECT COUNT(*) FROM loan_records WHERE return_date IS NULL AND due_date < CURDATE())          AS overdue_loans,
+        (SELECT COUNT(*) FROM loan_records WHERE issue_date = CURDATE())                                AS issued_today,
+        (SELECT COUNT(*) FROM loan_records WHERE return_date = CURDATE())                               AS returned_today
+")->fetch_assoc();
+
+$waiting_total = 0;
+$reservation_rows = [];
+if ($reservations_ready) {
+    $waiting_total = (int)$connection->query("SELECT COUNT(*) AS c FROM reservations WHERE status = 'waiting'")->fetch_assoc()['c'];
+
+    $stmt = $connection->prepare("
+        SELECT b.book_id, b.title, b.available_copies,
+               COUNT(*) AS waiting,
+               (SELECT CONCAT(u.first_name, ' ', u.last_name, ' (', m.member_number, ')')
+                FROM reservations r2
+                JOIN members m ON r2.member_id = m.member_id
+                JOIN users u ON m.user_id = u.user_id
+                WHERE r2.book_id = b.book_id AND r2.status = 'waiting'
+                ORDER BY r2.reservation_id ASC
+                LIMIT 1) AS next_member
+        FROM reservations r
+        JOIN books b ON r.book_id = b.book_id
+        WHERE r.status = 'waiting'
+        GROUP BY b.book_id, b.title, b.available_copies
+        ORDER BY (b.available_copies > 0) DESC, waiting DESC, b.title ASC
+        LIMIT 10
+    ");
     $stmt->execute();
-    $result = $stmt->get_result();
-    while ($row = $result->fetch_assoc()) {
-        $today_activity[] = $row;
-    }
+    $reservation_rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $stmt->close();
 }
+
+// ---------- Overdue loans (most overdue first) ----------
+$stmt = $connection->prepare("
+    SELECT lr.loan_id, lr.due_date, DATEDIFF(CURDATE(), lr.due_date) AS days_late,
+           b.title, m.member_number, u.first_name, u.last_name
+    FROM loan_records lr
+    JOIN books b ON lr.book_id = b.book_id
+    JOIN members m ON lr.member_id = m.member_id
+    JOIN users u ON m.user_id = u.user_id
+    WHERE lr.return_date IS NULL AND lr.due_date < CURDATE()
+    ORDER BY lr.due_date ASC
+    LIMIT 10
+");
+$stmt->execute();
+$overdue_rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+$stmt->close();
+
+// ---------- Today's activity (issues and returns as separate rows) ----------
+$stmt = $connection->prepare("
+    SELECT 'Issued' AS action, lr.loan_id, lr.due_date, lr.return_date,
+           b.title, m.member_number, u.first_name, u.last_name
+    FROM loan_records lr
+    JOIN books b ON lr.book_id = b.book_id
+    JOIN members m ON lr.member_id = m.member_id
+    JOIN users u ON m.user_id = u.user_id
+    WHERE lr.issue_date = CURDATE()
+    UNION ALL
+    SELECT 'Returned' AS action, lr.loan_id, lr.due_date, lr.return_date,
+           b.title, m.member_number, u.first_name, u.last_name
+    FROM loan_records lr
+    JOIN books b ON lr.book_id = b.book_id
+    JOIN members m ON lr.member_id = m.member_id
+    JOIN users u ON m.user_id = u.user_id
+    WHERE lr.return_date = CURDATE()
+    ORDER BY loan_id DESC
+    LIMIT 15
+");
+$stmt->execute();
+$today_activity = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+$stmt->close();
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -67,11 +120,10 @@ if ($stmt = $connection->prepare("
     <title>Librarian Dashboard - Library Management System</title>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link rel="stylesheet" type="text/css" href="bootstrap-4.4.1/css/bootstrap.min.css" />
-    <script type="text/javascript" src="bootstrap-4.4.1/js/jquery_latest.js"></script>
-    <script type="text/javascript" src="bootstrap-4.4.1/js/bootstrap.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/jquery@3.5.1/dist/jquery.slim.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/js/bootstrap.bundle.min.js"></script>
     <style type="text/css">
-        /* === Your original CSS preserved === */
         body {
             background-image: url("https://images.unsplash.com/photo-1481627834876-b7833e8f5570?ixlib=rb-4.0.3&auto=format&fit=crop&w=1920&q=80");
             background-size: cover;
@@ -80,7 +132,7 @@ if ($stmt = $connection->prepare("
             min-height: 100vh;
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
-        
+
         .container {
             background: rgba(255, 255, 255, 0.95);
             margin: 20px auto;
@@ -89,24 +141,24 @@ if ($stmt = $connection->prepare("
             box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
             min-height: 90vh;
         }
-        
+
         .navbar {
             background: rgba(40, 167, 69, 0.9);
             padding: 15px 30px;
             border-radius: 15px 15px 0 0;
         }
-        
+
         .content {
             padding: 30px;
         }
-        
+
         .stats-row {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
             gap: 20px;
             margin-bottom: 30px;
         }
-        
+
         .stat-card {
             background: linear-gradient(135deg, #28a745, #20c997);
             color: white;
@@ -114,33 +166,37 @@ if ($stmt = $connection->prepare("
             border-radius: 10px;
             text-align: center;
         }
-        
+
         .stat-card h3 {
             font-size: 2.5rem;
             margin-bottom: 10px;
             font-weight: bold;
         }
-        
+
+        .stat-card p {
+            margin: 0;
+        }
+
         .quick-actions {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
             gap: 20px;
             margin-bottom: 30px;
         }
-        
+
         .action-card {
             background: rgba(248, 249, 250, 0.9);
             padding: 25px;
             border-radius: 10px;
             border-left: 5px solid #28a745;
         }
-        
+
         .action-card h5 {
             color: #28a745;
             font-weight: 600;
             margin-bottom: 15px;
         }
-        
+
         .btn-librarian {
             background: #28a745;
             border: none;
@@ -151,33 +207,38 @@ if ($stmt = $connection->prepare("
             text-decoration: none;
             display: inline-block;
         }
-        
+
         .btn-librarian:hover {
             background: #218838;
             color: white;
             text-decoration: none;
         }
-        
+
         .daily-tasks {
             background: rgba(248, 249, 250, 0.9);
             padding: 20px;
             border-radius: 10px;
+            margin-bottom: 30px;
         }
-        
+
         .table {
             background: white;
             border-radius: 8px;
             overflow: hidden;
         }
-        
+
         .table th {
             background: #28a745;
             color: white;
             border: none;
         }
-        
+
         .alert-warning {
             border-left: 5px solid #ffc107;
+        }
+
+        .section-anchor {
+            scroll-margin-top: 20px;
         }
     </style>
 </head>
@@ -190,60 +251,19 @@ if ($stmt = $connection->prepare("
             </button>
             <div class="collapse navbar-collapse" id="navbarNav">
                 <ul class="navbar-nav mr-auto">
-                    <li class="nav-item active">
-                        <a class="nav-link" href="librarian_dashboard.php">Dashboard</a>
-                    </li>
-                    <li class="nav-item dropdown">
-                        <a class="nav-link dropdown-toggle" href="#" id="transactionsDropdown" role="button" data-toggle="dropdown">
-                            Transactions
-                        </a>
-                        <div class="dropdown-menu">
-                            <a class="dropdown-item" href="issue_book.php">Issue Book</a>
-                            <a class="dropdown-item" href="return_book.php">Return Book</a>
-                            <a class="dropdown-item" href="renew_book.php">Renew Book</a>
-                            <a class="dropdown-item" href="reserve_book.php">Book Reservations</a>
-                        </div>
-                    </li>
-                    <li class="nav-item dropdown">
-                        <a class="nav-link dropdown-toggle" href="#" id="booksDropdown" role="button" data-toggle="dropdown">
-                            Books
-                        </a>
-                        <div class="dropdown-menu">
-                            <a class="dropdown-item" href="book_management.php">Manage Books</a>
-                            <a class="dropdown-item" href="book_search.php">Search Books</a>
-                            <a class="dropdown-item" href="book_availability.php">Check Availability</a>
-                        </div>
-                    </li>
-                    <li class="nav-item dropdown">
-                        <a class="nav-link dropdown-toggle" href="#" id="membersDropdown" role="button" data-toggle="dropdown">
-                            Members
-                        </a>
-                        <div class="dropdown-menu">
-                            <a class="dropdown-item" href="member_search.php">Search Members</a>
-                            <a class="dropdown-item" href="member_loans.php">Member Loans</a>
-                            <a class="dropdown-item" href="member_fines.php">Member Fines</a>
-                        </div>
-                    </li>
-                    <li class="nav-item dropdown">
-                        <a class="nav-link dropdown-toggle" href="#" id="reportsDropdown" role="button" data-toggle="dropdown">
-                            Reports
-                        </a>
-                        <div class="dropdown-menu">
-                            <a class="dropdown-item" href="overdue_report.php">Overdue Books</a>
-                            <a class="dropdown-item" href="daily_transactions.php">Daily Transactions</a>
-                            <a class="dropdown-item" href="fine_collection.php">Fine Collection</a>
-                        </div>
-                    </li>
+                    <li class="nav-item active"><a class="nav-link" href="librarian_dashboard.php">Dashboard</a></li>
+                    <li class="nav-item"><a class="nav-link" href="issue_book.php">Issue Book</a></li>
+                    <li class="nav-item"><a class="nav-link" href="return_book.php">Return Book</a></li>
+                    <li class="nav-item"><a class="nav-link" href="book_management.php">Manage Books</a></li>
+                    <li class="nav-item"><a class="nav-link" href="#overdue-section">Overdue</a></li>
+                    <li class="nav-item"><a class="nav-link" href="#reservation-section">Reservations</a></li>
                 </ul>
                 <ul class="navbar-nav">
                     <li class="nav-item dropdown">
                         <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" data-toggle="dropdown">
-                            Welcome, <?php echo e($_SESSION['name']); ?>
+                            Welcome, <?php echo e($_SESSION['name'] ?? ''); ?>
                         </a>
                         <div class="dropdown-menu dropdown-menu-right">
-                            <a class="dropdown-item" href="librarian_profile.php">My Profile</a>
-                            <a class="dropdown-item" href="change_password.php">Change Password</a>
-                            <div class="dropdown-divider"></div>
                             <a class="dropdown-item" href="logout.php">Logout</a>
                         </div>
                     </li>
@@ -253,36 +273,43 @@ if ($stmt = $connection->prepare("
 
         <div class="content">
             <h2 class="mb-4">Daily Operations</h2>
-            
+
             <!-- Statistics -->
             <div class="stats-row">
-                <div class="stat-card">
-                    <h3><?php echo e($books_count); ?></h3>
-                    <p>Available Books</p>
+                <div class="stat-card" title="Copies on the shelf right now">
+                    <h3><?php echo (int)$stats['available_copies']; ?></h3>
+                    <p>Copies Available</p>
                 </div>
-                <div class="stat-card">
-                    <h3><?php echo e($loans_count); ?></h3>
+                <div class="stat-card" title="Books currently borrowed">
+                    <h3><?php echo (int)$stats['active_loans']; ?></h3>
                     <p>Active Loans</p>
                 </div>
-                <div class="stat-card">
-                    <h3><?php echo e($overdue_count); ?></h3>
+                <div class="stat-card" title="Borrowed books past their due date">
+                    <h3><?php echo (int)$stats['overdue_loans']; ?></h3>
                     <p>Overdue Books</p>
                 </div>
                 <div class="stat-card">
-                    <h3><?php echo e($issued_count); ?></h3>
+                    <h3><?php echo (int)$stats['issued_today']; ?></h3>
                     <p>Issued Today</p>
                 </div>
                 <div class="stat-card">
-                    <h3><?php echo e($returned_count); ?></h3>
+                    <h3><?php echo (int)$stats['returned_today']; ?></h3>
                     <p>Returned Today</p>
                 </div>
+                <?php if ($reservations_ready): ?>
+                    <div class="stat-card" title="Members waiting for a book">
+                        <h3><?php echo $waiting_total; ?></h3>
+                        <p>Waiting Reservations</p>
+                    </div>
+                <?php endif; ?>
             </div>
 
             <!-- Overdue Alert -->
-            <?php if ($overdue_count > 0): ?>
-            <div class="alert alert-warning">
-                <strong>Attention!</strong> There are <?php echo e($overdue_count); ?> overdue books that need follow-up.
-            </div>
+            <?php if ((int)$stats['overdue_loans'] > 0): ?>
+                <div class="alert alert-warning">
+                    <strong>Attention!</strong> There are <?php echo (int)$stats['overdue_loans']; ?> overdue books that need follow-up.
+                    <a href="#overdue-section">See the list</a>.
+                </div>
             <?php endif; ?>
 
             <!-- Quick Actions -->
@@ -293,37 +320,110 @@ if ($stmt = $connection->prepare("
                     <p>Issue books to library members</p>
                     <a href="issue_book.php" class="btn btn-librarian">Issue Book</a>
                 </div>
-                
+
                 <div class="action-card">
                     <h5>Return Book</h5>
-                    <p>Process book returns</p>
+                    <p>Process returns and fines</p>
                     <a href="return_book.php" class="btn btn-librarian">Return Book</a>
                 </div>
-                
+
                 <div class="action-card">
                     <h5>Manage Books</h5>
                     <p>Add or edit book information</p>
                     <a href="book_management.php" class="btn btn-librarian">Manage Books</a>
                 </div>
-                
+
                 <div class="action-card">
-                    <h5>Member Search</h5>
-                    <p>Search and view member details</p>
-                    <a href="member_search.php" class="btn btn-librarian">Search Members</a>
+                    <h5>Overdue Follow-up</h5>
+                    <p>See who has overdue books</p>
+                    <a href="#overdue-section" class="btn btn-librarian">View Overdue</a>
                 </div>
-                
-                <div class="action-card">
-                    <h5>Loan History</h5>
-                    <p>View borrowing history and reports</p>
-                    <a href="loan_history.php" class="btn btn-librarian">View History</a>
-                </div>
-                
-                <div class="action-card">
-                    <h5>Fine Management</h5>
-                    <p>Calculate and manage fines</p>
-                    <a href="fine_management.php" class="btn btn-librarian">Manage Fines</a>
-                </div>
+
+                <?php if ($reservations_ready): ?>
+                    <div class="action-card">
+                        <h5>Reservations</h5>
+                        <p>See which books members are waiting for</p>
+                        <a href="#reservation-section" class="btn btn-librarian">View Queue</a>
+                    </div>
+                <?php endif; ?>
             </div>
+
+            <!-- Overdue loans -->
+            <div class="daily-tasks section-anchor" id="overdue-section">
+                <h5 class="mb-3">Overdue Books</h5>
+                <div class="table-responsive">
+                    <table class="table table-hover">
+                        <thead>
+                            <tr>
+                                <th>Member</th>
+                                <th>Book Title</th>
+                                <th>Due Date</th>
+                                <th>Days Overdue</th>
+                                <th>Fine So Far</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php if (count($overdue_rows) > 0): ?>
+                                <?php foreach ($overdue_rows as $row): ?>
+                                    <tr>
+                                        <td><?php echo e($row['first_name'] . ' ' . $row['last_name']); ?><br><small class="text-muted"><?php echo e($row['member_number']); ?></small></td>
+                                        <td><?php echo e($row['title']); ?></td>
+                                        <td><?php echo fmt_date($row['due_date']); ?></td>
+                                        <td><span class="badge badge-danger"><?php echo (int)$row['days_late']; ?> days</span></td>
+                                        <td><?php echo money((int)$row['days_late'] * FINE_PER_DAY); ?></td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php else: ?>
+                                <tr><td colspan="5" class="text-center text-muted">No overdue books 🎉</td></tr>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+                <?php if ((int)$stats['overdue_loans'] > count($overdue_rows)): ?>
+                    <p class="text-muted mb-0">Showing the 10 most overdue. <a href="return_book.php">Open Return Book</a> to see every loan sorted by due date.</p>
+                <?php endif; ?>
+            </div>
+
+            <!-- Reservation queue -->
+            <?php if ($reservations_ready): ?>
+                <div class="daily-tasks section-anchor" id="reservation-section">
+                    <h5 class="mb-3">Reservation Queue</h5>
+                    <div class="table-responsive">
+                        <table class="table table-hover">
+                            <thead>
+                                <tr>
+                                    <th>Book Title</th>
+                                    <th>Waiting</th>
+                                    <th>Next In Line</th>
+                                    <th>Copies On Shelf</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php if (count($reservation_rows) > 0): ?>
+                                    <?php foreach ($reservation_rows as $row): ?>
+                                        <tr>
+                                            <td><?php echo e($row['title']); ?></td>
+                                            <td><?php echo (int)$row['waiting']; ?></td>
+                                            <td><?php echo e($row['next_member']); ?></td>
+                                            <td><?php echo (int)$row['available_copies']; ?></td>
+                                            <td>
+                                                <?php if ((int)$row['available_copies'] > 0): ?>
+                                                    <span class="badge badge-success">Ready to issue</span>
+                                                <?php else: ?>
+                                                    <span class="badge badge-warning">Waiting for a return</span>
+                                                <?php endif; ?>
+                                            </td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                <?php else: ?>
+                                    <tr><td colspan="5" class="text-center text-muted">No members are waiting for books</td></tr>
+                                <?php endif; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            <?php endif; ?>
 
             <!-- Today's Activity -->
             <div class="daily-tasks">
@@ -332,31 +432,37 @@ if ($stmt = $connection->prepare("
                     <table class="table table-hover">
                         <thead>
                             <tr>
-                                <th>Time</th>
+                                <th>Action</th>
                                 <th>Member</th>
                                 <th>Book Title</th>
-                                <th>Action</th>
                                 <th>Due Date</th>
                                 <th>Status</th>
                             </tr>
                         </thead>
                         <tbody>
                             <?php if (count($today_activity) > 0): ?>
-                                <?php foreach ($today_activity as $activity): 
-                                    $action = (date('Y-m-d', strtotime($activity['return_date'])) == date('Y-m-d')) ? 'Returned' : 'Issued';
-                                    $time = ($action === 'Returned') ? date('H:i', strtotime($activity['return_date'])) : date('H:i', strtotime($activity['issue_date']));
+                                <?php foreach ($today_activity as $activity):
+                                    if (!empty($activity['return_date'])) {
+                                        $status_class = 'success';
+                                        $status_text  = 'Returned';
+                                    } elseif (strtotime($activity['due_date']) < strtotime('today')) {
+                                        $status_class = 'danger';
+                                        $status_text  = 'Overdue';
+                                    } else {
+                                        $status_class = 'warning';
+                                        $status_text  = 'Active';
+                                    }
                                 ?>
                                     <tr>
-                                        <td><?php echo e($time); ?></td>
+                                        <td><span class="badge badge-<?php echo $activity['action'] === 'Issued' ? 'primary' : 'success'; ?>"><?php echo e($activity['action']); ?></span></td>
                                         <td><?php echo e($activity['first_name'] . ' ' . $activity['last_name']); ?><br><small class="text-muted"><?php echo e($activity['member_number']); ?></small></td>
                                         <td><?php echo e($activity['title']); ?></td>
-                                        <td><span class="badge badge-<?php echo $action === 'Issued' ? 'primary' : 'success'; ?>"><?php echo e($action); ?></span></td>
-                                        <td><?php echo e(date('M d, Y', strtotime($activity['due_date']))); ?></td>
-                                        <td><span class="badge badge-<?php echo ($activity['status'] == 'active' ? 'warning' : ($activity['status'] == 'returned' ? 'success' : 'danger')); ?>"><?php echo e(ucfirst($activity['status'])); ?></span></td>
+                                        <td><?php echo fmt_date($activity['due_date']); ?></td>
+                                        <td><span class="badge badge-<?php echo $status_class; ?>"><?php echo $status_text; ?></span></td>
                                     </tr>
                                 <?php endforeach; ?>
                             <?php else: ?>
-                                <tr><td colspan="6" class="text-center text-muted">No activity today</td></tr>
+                                <tr><td colspan="5" class="text-center text-muted">No activity today</td></tr>
                             <?php endif; ?>
                         </tbody>
                     </table>
