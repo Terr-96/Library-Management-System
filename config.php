@@ -1,4 +1,9 @@
 <?php
+
+if (!headers_sent()) {
+    header("Cache-Control: no-store, no-cache, must-revalidate, max-age=0");
+}
+
 // Show errors as exceptions (set to off or log-only in production)
 mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 

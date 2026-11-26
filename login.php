@@ -15,6 +15,7 @@ $lockout_time = 300; // 5 minutes lockout
 $locked_out = false;
 $remaining = 0;
 $login_error = "";
+$timed_out = isset($_GET['timeout']); // set by pages that log you out after 30 minutes
 
 if ($_SESSION['login_attempts'] >= $max_attempts) {
     $time_since_last_attempt = time() - $_SESSION['last_login_attempt'];
@@ -214,6 +215,9 @@ if (isset($_POST['login']) && !$locked_out) {
                     Too many failed login attempts. Please try again in <?php echo ceil($remaining); ?> seconds.
                 </div>
             <?php else: ?>
+                <?php if ($timed_out && empty($login_error)): ?>
+                    <div class="alert alert-info">Your session expired. Please sign in again.</div>
+                <?php endif; ?>
                 <?php if (!empty($login_error)): ?>
                     <div class="alert alert-danger"><?php echo htmlspecialchars($login_error, ENT_QUOTES, 'UTF-8'); ?></div>
                 <?php endif; ?>
